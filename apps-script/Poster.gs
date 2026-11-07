@@ -1,9 +1,10 @@
 /**
  * Room Totonoe — 毎日の自動投稿
  *
- * postDaily     … 楽天の売れ筋から未投稿の商品を1つ選び、Threadsに画像付きで投稿する
- * previewDaily  … 投稿はせず、選ばれる商品と投稿文をログで確認する
- * setupDailyTrigger … 毎日20時台に postDaily を実行するトリガーを作る（一度だけ）
+ * collectCandidates … 朝、楽天の売れ筋から候補を3つ選んでGitHubに保存する
+ * postDaily     … 夜、Claudeが書いた投稿文でThreadsに画像付きで投稿する（なければ従来の文面）
+ * previewDaily  … 投稿はせず、今日投稿される内容をログで確認する
+ * setupCollectTrigger / setupDailyTrigger … 毎朝7時台・毎晩20時台のトリガーを作る（一度だけ）
  */
 
 // 商品を選ぶ条件
@@ -20,9 +21,19 @@ const GENRE_SCHEDULE = ['interior', 'interior', 'kitchen', 'interior', 'interior
 // 体への効果をうたう表現は使わない（薬機法対策）。商品名にあれば削る
 const NG_WORDS = ['肩こり', '腰痛', '改善', '治る', '効く', '解消', '安眠', '快眠', '痩せ', 'ダイエット', '美肌', '医療', '治療'];
 
+/** 日本時間の今日（YYYY-MM-DD） */
+function todayKey_() {
+  return Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+}
+
+function todayGenreKey_() {
+  // 'u' は 1=月 … 7=日。GENRE_SCHEDULE は 0=日 … 6=土
+  const u = Number(Utilities.formatDate(new Date(), 'Asia/Tokyo', 'u'));
+  return GENRE_SCHEDULE[u % 7];
+}
+
 function todayGenre_() {
-  const key = GENRE_SCHEDULE[new Date().getDay()];
-  return GENRES[key];
+  return GENRES[todayGenreKey_()];
 }
 
 function postedCodes_() {
@@ -36,10 +47,11 @@ function rememberPosted_(code) {
   props_().setProperty('POSTED_CODES', JSON.stringify(codes.slice(-300)));
 }
 
-/** 条件に合う未投稿の商品を1つ選ぶ */
-function pickItem_(genre) {
+/** 条件に合う未投稿の商品を n 個選ぶ（上位に偏らないようランダムに） */
+function pickItems_(genre, n) {
   const posted = postedCodes_();
-  for (let page = 1; page <= 3; page++) {
+  let pool = [];
+  for (let page = 1; page <= 3 && pool.length < n * 4; page++) {
     const items = searchRakutenItems({
       genreId: genre.id,
       sort: '-reviewCount',
@@ -48,18 +60,23 @@ function pickItem_(genre) {
       minPrice: PICK_RULES.minPrice,
       maxPrice: PICK_RULES.maxPrice
     });
-    const candidates = items.filter(function (it) {
+    pool = pool.concat(items.filter(function (it) {
       return it.images.length > 0 &&
         it.reviewCount >= PICK_RULES.minReviewCount &&
         it.reviewAverage >= PICK_RULES.minReviewAverage &&
         posted.indexOf(it.code) < 0;
-    });
-    if (candidates.length) {
-      // 上位から順に出すと偏るので、候補の中からランダムに選ぶ
-      return candidates[Math.floor(Math.random() * Math.min(candidates.length, 10))];
-    }
+    }));
   }
-  throw new Error('条件に合う未投稿の商品が見つかりませんでした（' + genre.label + '）');
+  if (!pool.length) throw new Error('条件に合う未投稿の商品が見つかりませんでした（' + genre.label + '）');
+  const picked = [];
+  while (pool.length && picked.length < n) {
+    picked.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+  }
+  return picked;
+}
+
+function pickItem_(genre) {
+  return pickItems_(genre, 1)[0];
 }
 
 // 商品名から外す単語（サイズ・型番・宣伝文句など）
@@ -119,29 +136,143 @@ function buildPostText_(item, genre) {
   return lines.join('\n').slice(0, 500);
 }
 
-/** 投稿せずに、選ばれる商品と投稿文を確認する */
-function previewDaily() {
+// ---------------------------------------------------------------
+// Claude が書いた投稿文を使う仕組み
+//  朝7時台 collectCandidates：候補3つを queue/candidates/日付.json に保存
+//  朝（Claudeの定期実行）：1つ選んで queue/posts/日付.json に投稿文を保存
+//  夜20時台 postDaily：投稿文があればそれで投稿、なければ従来の文面で投稿
+// ---------------------------------------------------------------
+
+const THREADS_MAX = 500;
+// Claudeの本文に含まれていたら使わない表現（体への効果・誇張・使用体験の捏造）
+const BODY_NG = NG_WORDS.concat(['最強', '絶対', '神アイテム', '間違いない', '使ってみ', '我が家', '買ってよかった',
+  '疲れ', '健康', 'http', '#PR']);
+
+function hasGitHub_() {
+  return !!props_().getProperty('GITHUB_TOKEN');
+}
+
+function candidateFromItem_(item) {
+  return {
+    code: item.code,
+    name: item.name,
+    catchcopy: item.catchcopy,
+    caption: item.caption,
+    price: item.price,
+    reviewAverage: item.reviewAverage,
+    reviewCount: item.reviewCount,
+    shop: item.shop,
+    sizes: sizeLine_(item.name).replace('選べるサイズ：', ''),
+    affiliateUrl: item.affiliateUrl,
+    image: item.images[0]
+  };
+}
+
+/** 朝：候補商品を3つ選んで GitHub に保存する */
+function collectCandidates() {
+  const key = todayGenreKey_();
+  const genre = GENRES[key];
+  const items = pickItems_(genre, 3).map(candidateFromItem_);
+  const data = { date: todayKey_(), genre: { key: key, label: genre.label }, items: items };
+  ghPutFile('queue/candidates/' + data.date + '.json', JSON.stringify(data, null, 2),
+    'Add candidates for ' + data.date);
+  Logger.log('候補を保存しました：' + data.date + '\n' + items.map(function (it) { return '・' + it.name.slice(0, 40); }).join('\n'));
+}
+
+/** アフィリエイトリンクを短くする（商品ページの指定だけを残す） */
+function shortAffiliateUrl_(url) {
+  const m = String(url).match(/^(https:\/\/hb\.afl\.rakuten\.co\.jp\/hgc\/[^/?]+\/)\?(?:.*&)?pc=([^&]+)/);
+  return m ? m[1] + '?pc=' + m[2] : url;
+}
+
+/** Claude の本文から投稿文を組み立てる。条件を満たさなければ null */
+function composeFromQueue_(post, cand) {
+  const body = String(post.body || '').trim();
+  if (body.length < 40) return null;
+  const bad = BODY_NG.filter(function (w) { return body.indexOf(w) >= 0; });
+  if (bad.length) {
+    Logger.log('本文に使えない表現があったため、従来の文面で投稿します：' + bad.join('、'));
+    return null;
+  }
+  const tags = (post.hashtags || []).filter(function (t) { return /^#\S+$/.test(t); }).slice(0, 3).join(' ');
+  const info = '★' + Number(cand.reviewAverage).toFixed(2) + '（レビュー' + Number(cand.reviewCount).toLocaleString('ja-JP') +
+    '件）・' + Number(cand.price).toLocaleString('ja-JP') + '円〜（投稿時点）';
+
+  const build = function (url) {
+    return ['#PR', body, '', info, '▶ 楽天で見る', url, '', tags].join('\n').trim();
+  };
+  let text = build(cand.affiliateUrl);
+  if (text.length > THREADS_MAX) text = build(shortAffiliateUrl_(cand.affiliateUrl));
+  if (text.length > THREADS_MAX) {
+    Logger.log('投稿文が' + THREADS_MAX + '文字を超えるため、従来の文面で投稿します');
+    return null;
+  }
+  return text;
+}
+
+/** 今日の投稿内容を決める。{ text, image, code, source } */
+function todaysPost_() {
+  const date = todayKey_();
   const genre = todayGenre_();
+  if (hasGitHub_()) {
+    try {
+      const postFile = ghGetFile('queue/posts/' + date + '.json');
+      const candFile = ghGetFile('queue/candidates/' + date + '.json');
+      if (postFile && candFile) {
+        const post = JSON.parse(postFile.text);
+        const cand = (JSON.parse(candFile.text).items || []).filter(function (c) { return c.code === post.code; })[0];
+        const text = cand ? composeFromQueue_(post, cand) : null;
+        if (text) return { text: text, image: cand.image, code: cand.code, source: 'claude' };
+      } else {
+        Logger.log('今日のClaudeの投稿文が見つからないため、従来の文面で投稿します');
+      }
+    } catch (e) {
+      Logger.log('Claudeの投稿文を読めなかったため、従来の文面で投稿します：' + e.message);
+    }
+  }
   const item = pickItem_(genre);
-  Logger.log('ジャンル：' + genre.label + '\n商品：' + item.name + '\n画像：' + item.images[0] +
-    '\n\n--- 投稿文 ---\n' + buildPostText_(item, genre));
+  return { text: buildPostText_(item, genre), image: item.images[0], code: item.code, source: 'template' };
+}
+
+/** 投稿せずに、今日投稿される内容を確認する */
+function previewDaily() {
+  const p = todaysPost_();
+  Logger.log('文面の種類：' + (p.source === 'claude' ? 'Claudeが書いた文章' : '従来の文面') +
+    '\n画像：' + p.image + '\n文字数：' + p.text.length + '\n\n--- 投稿文 ---\n' + p.text);
 }
 
 /** 毎日の投稿本体 */
 function postDaily() {
-  const genre = todayGenre_();
-  const item = pickItem_(genre);
-  const text = buildPostText_(item, genre);
-  const postId = postToThreads(text, item.images[0]);
-  rememberPosted_(item.code);
-  Logger.log('Threadsに投稿しました：' + postId + '\n' + item.name);
+  const p = todaysPost_();
+  const postId = postToThreads(p.text, p.image);
+  rememberPosted_(p.code);
+  Logger.log('Threadsに投稿しました（' + p.source + '）：' + postId);
+  if (hasGitHub_()) {
+    try {
+      ghPutFile('queue/posted/' + todayKey_() + '.json',
+        JSON.stringify({ date: todayKey_(), code: p.code, source: p.source, threadsId: postId, text: p.text }, null, 2),
+        'Record post for ' + todayKey_());
+    } catch (e) {
+      Logger.log('投稿記録の保存に失敗しました（投稿自体は完了）：' + e.message);
+    }
+  }
 }
 
 /** 毎日20時台に postDaily を実行するトリガーを作る（一度だけ実行） */
 function setupDailyTrigger() {
-  ScriptApp.getProjectTriggers()
-    .filter(function (t) { return t.getHandlerFunction() === 'postDaily'; })
-    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
-  ScriptApp.newTrigger('postDaily').timeBased().everyDays(1).atHour(20).inTimezone('Asia/Tokyo').create();
+  replaceTrigger_('postDaily', 20);
   Logger.log('毎日20時台に自動投稿するトリガーを作りました');
+}
+
+/** 毎朝7時台に collectCandidates を実行するトリガーを作る（一度だけ実行） */
+function setupCollectTrigger() {
+  replaceTrigger_('collectCandidates', 7);
+  Logger.log('毎朝7時台に候補を保存するトリガーを作りました');
+}
+
+function replaceTrigger_(fn, hour) {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === fn; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger(fn).timeBased().everyDays(1).atHour(hour).inTimezone('Asia/Tokyo').create();
 }

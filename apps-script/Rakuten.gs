@@ -89,6 +89,7 @@ function normalizeRakutenItem_(raw) {
     code: item.itemCode,
     name: item.itemName,
     catchcopy: item.catchcopy || '',
+    caption: String(item.itemCaption || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 800),
     price: Number(item.itemPrice),
     url: item.itemUrl,
     affiliateUrl: item.affiliateUrl || item.itemUrl,

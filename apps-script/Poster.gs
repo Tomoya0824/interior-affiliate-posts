@@ -62,38 +62,61 @@ function pickItem_(genre) {
   throw new Error('条件に合う未投稿の商品が見つかりませんでした（' + genre.label + '）');
 }
 
-/** 長い楽天の商品名を、投稿向けの短い名前にする */
-function shortName_(name) {
+// 商品名から外す単語（サイズ・型番・宣伝文句など）
+const SIZE_WORDS = ['シングル', 'セミシングル', 'セミダブル', 'ダブル', 'クイーン', 'キング', 'ワイドダブル'];
+const NOISE_PATTERNS = [
+  /^\d+点セット$/, /^[A-Za-z]{0,3}-?\d{2,}[A-Za-z]?$/, /\d+(\.\d+)?(cm|mm|m|kg|g|L|ml)$/i,
+  /送料無料/, /ポイント\d*倍?/, /楽天\d*位/, /ランキング/, /^公式$/, /^安心$/, /^清潔$/, /^SALE$/i,
+  /^クーポン/, /^あす楽/, /^限定/, /^新作$/, /^新色$/, /^母の日$/, /^父の日$/, /^ギフト$/, /^プレゼント$/
+];
+
+function cleanTokens_(name) {
   let s = String(name)
     .replace(/【[^】]*】/g, ' ')
-    .replace(/［[^］]*］|\[[^\]]*\]/g, ' ')
-    .replace(/[★☆◆◇■□●○♪＼／\\/!！]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  NG_WORDS.forEach(function (w) { s = s.split(w).join(''); });
-  s = s.replace(/\s+/g, ' ').trim();
-  return s.length > 40 ? s.slice(0, 40).trim() + '…' : s;
+    .replace(/［[^］]*］|\[[^\]]*\]|＜[^＞]*＞|<[^>]*>/g, ' ')
+    .replace(/[★☆◆◇■□●○♪＼／\\/!！|｜]+/g, ' ');
+  NG_WORDS.forEach(function (w) { s = s.split(w).join(' '); });
+  const seen = {};
+  return s.split(/[\s　]+/).filter(function (t) {
+    if (!t || seen[t]) return false;
+    seen[t] = true;
+    return true;
+  });
+}
+
+/** 長い楽天の商品名を、投稿向けの短い名前にする（単語の途中では切らない） */
+function shortName_(name) {
+  const tokens = cleanTokens_(name).filter(function (t) {
+    if (SIZE_WORDS.indexOf(t) >= 0) return false;
+    return !NOISE_PATTERNS.some(function (re) { return re.test(t); });
+  });
+  let out = '';
+  for (let i = 0; i < tokens.length; i++) {
+    const next = out ? out + ' ' + tokens[i] : tokens[i];
+    if (next.length > 24 && out) break;
+    out = next;
+  }
+  return out || String(name).slice(0, 24);
+}
+
+/** 商品名に含まれるサイズ展開（例：シングル／セミダブル／ダブル） */
+function sizeLine_(name) {
+  const found = SIZE_WORDS.filter(function (w) { return cleanTokens_(name).indexOf(w) >= 0; });
+  return found.length >= 2 ? '選べるサイズ：' + found.join('／') : '';
 }
 
 /** 投稿文を作る（Threadsは500文字まで） */
 function buildPostText_(item, genre) {
+  const sizes = sizeLine_(item.name);
   const lines = [
     '#PR ' + shortName_(item.name),
     '',
     '★' + item.reviewAverage.toFixed(2) + '（レビュー' + item.reviewCount.toLocaleString('ja-JP') + '件）',
-    item.price.toLocaleString('ja-JP') + '円（税込・投稿時点）',
-    '',
-    '楽天で詳細を見る',
-    item.affiliateUrl,
-    '',
-    genre.tags + ' #楽天で見つけた'
+    item.price.toLocaleString('ja-JP') + '円〜（税込・投稿時点）'
   ];
-  let text = lines.join('\n');
-  if (text.length > 500) {
-    lines[0] = '#PR ' + shortName_(item.name).slice(0, 20) + '…';
-    text = lines.join('\n');
-  }
-  return text;
+  if (sizes) lines.push(sizes);
+  lines.push('', '楽天で詳細を見る', item.affiliateUrl, '', genre.tags + ' #楽天で見つけた');
+  return lines.join('\n').slice(0, 500);
 }
 
 /** 投稿せずに、選ばれる商品と投稿文を確認する */

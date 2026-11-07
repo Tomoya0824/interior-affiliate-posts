@@ -3,7 +3,8 @@
  *
  * collectCandidates … 朝、楽天の売れ筋から候補を3つ選んでGitHubに保存する
  * postDaily     … 夜、Claudeが書いた投稿文でThreadsに画像付きで投稿する（なければ従来の文面）
- * previewDaily  … 投稿はせず、今日投稿される内容をログで確認する
+ * postTipDaily  … 昼、Claudeが書いた「暮らしのコツ」をリンクなしで投稿する（なければ投稿しない）
+ * previewDaily / previewTip … 投稿はせず、今日投稿される内容をログで確認する
  * setupCollectTrigger / setupDailyTrigger … 毎朝7時台・毎晩20時台のトリガーを作る（一度だけ）
  */
 
@@ -256,6 +257,60 @@ function postDaily() {
       Logger.log('投稿記録の保存に失敗しました（投稿自体は完了）：' + e.message);
     }
   }
+}
+
+// ---------------------------------------------------------------
+// お役立ち投稿（毎日12時台・リンクなし）
+//  Claudeが queue/tips/日付.json に書いた文章をテキストのみで投稿する。
+//  文章がない日は何も投稿しない（決まった文面の宣伝は増やさない）。
+// ---------------------------------------------------------------
+
+function todaysTip_() {
+  if (!hasGitHub_()) return null;
+  const file = ghGetFile('queue/tips/' + todayKey_() + '.json');
+  if (!file) return null;
+  const tip = JSON.parse(file.text);
+  const body = String(tip.body || '').trim();
+  if (body.length < 60) return null;
+  const bad = BODY_NG.filter(function (w) { return body.indexOf(w) >= 0; });
+  if (bad.length) {
+    Logger.log('お役立ち投稿に使えない表現があったため、今日は投稿しません：' + bad.join('、'));
+    return null;
+  }
+  const tags = (tip.hashtags || []).filter(function (t) { return /^#\S+$/.test(t); }).slice(0, 3).join(' ');
+  const text = (body + (tags ? '\n\n' + tags : '')).slice(0, THREADS_MAX);
+  return { text: text, theme: tip.theme || '' };
+}
+
+/** お役立ち投稿の内容を確認する（投稿はしない） */
+function previewTip() {
+  const tip = todaysTip_();
+  Logger.log(tip ? 'テーマ：' + tip.theme + '\n文字数：' + tip.text.length + '\n\n' + tip.text
+    : '今日のお役立ち投稿はまだありません');
+}
+
+/** お役立ち投稿の本体 */
+function postTipDaily() {
+  const tip = todaysTip_();
+  if (!tip) {
+    Logger.log('今日のお役立ち投稿がないため、何もしませんでした');
+    return;
+  }
+  const postId = postToThreads(tip.text);
+  Logger.log('お役立ち投稿をしました：' + postId);
+  try {
+    ghPutFile('queue/posted/' + todayKey_() + '-tip.json',
+      JSON.stringify({ date: todayKey_(), theme: tip.theme, threadsId: postId, text: tip.text }, null, 2),
+      'Record tip post for ' + todayKey_());
+  } catch (e) {
+    Logger.log('投稿記録の保存に失敗しました（投稿自体は完了）：' + e.message);
+  }
+}
+
+/** 毎日12時台に postTipDaily を実行するトリガーを作る（一度だけ実行） */
+function setupTipTrigger() {
+  replaceTrigger_('postTipDaily', 12);
+  Logger.log('毎日12時台にお役立ち投稿をするトリガーを作りました');
 }
 
 /** 毎日20時台に postDaily を実行するトリガーを作る（一度だけ実行） */

@@ -12,12 +12,12 @@
 const PICK_RULES = {
   minReviewCount: 30,
   minReviewAverage: 4.0,
-  minPrice: 1000,
-  maxPrice: 30000
+  minPrice: 2000,
+  maxPrice: 50000
 };
 
-// 曜日ごとの担当ジャンル（日〜土）。インテリア中心、キッチンを週2回
-const GENRE_SCHEDULE = ['interior', 'interior', 'kitchen', 'interior', 'interior', 'kitchen', 'interior'];
+// 曜日ごとの担当（日〜土）。おしゃれな家具・照明を日替わりで
+const GENRE_SCHEDULE = ['sideTable', 'floorLight', 'stool', 'shelf', 'lowTable', 'pendant', 'mirror'];
 
 // 体への効果をうたう表現は使わない（薬機法対策）。商品名にあれば削る
 const NG_WORDS = ['肩こり', '腰痛', '改善', '治る', '効く', '解消', '安眠', '快眠', '痩せ', 'ダイエット', '美肌', '医療', '治療'];
@@ -51,22 +51,38 @@ function rememberPosted_(code) {
 /** 条件に合う未投稿の商品を n 個選ぶ（上位に偏らないようランダムに） */
 function pickItems_(genre, n) {
   const posted = postedCodes_();
-  let pool = [];
-  for (let page = 1; page <= 3 && pool.length < n * 4; page++) {
-    const items = searchRakutenItems({
-      genreId: genre.id,
-      sort: '-reviewCount',
-      hits: 30,
-      page: page,
-      minPrice: PICK_RULES.minPrice,
-      maxPrice: PICK_RULES.maxPrice
-    });
-    pool = pool.concat(items.filter(function (it) {
-      return it.images.length > 0 &&
-        it.reviewCount >= PICK_RULES.minReviewCount &&
-        it.reviewAverage >= PICK_RULES.minReviewAverage &&
-        posted.indexOf(it.code) < 0;
-    }));
+  const collect = function (genreId) {
+    let pool = [];
+    for (let page = 1; page <= 3 && pool.length < n * 4; page++) {
+      let items;
+      try {
+        items = searchRakutenItems({
+          genreId: genreId,
+          keyword: genre.keyword,
+          sort: '-reviewCount',
+          hits: 30,
+          page: page,
+          minPrice: PICK_RULES.minPrice,
+          maxPrice: PICK_RULES.maxPrice
+        });
+      } catch (e) {
+        if (page === 1) throw e;
+        break; // 2ページ目以降が無いときはそこまで
+      }
+      pool = pool.concat(items.filter(function (it) {
+        return it.images.length > 0 &&
+          it.reviewCount >= PICK_RULES.minReviewCount &&
+          it.reviewAverage >= PICK_RULES.minReviewAverage &&
+          posted.indexOf(it.code) < 0;
+      }));
+    }
+    return pool;
+  };
+  let pool = collect(genre.id);
+  // キーワード検索でジャンル内に足りないとき（照明が別ジャンルなど）は、ジャンルを外して探し直す
+  if (pool.length < n && genre.keyword) {
+    const seen = pool.map(function (it) { return it.code; });
+    pool = pool.concat(collect(undefined).filter(function (it) { return seen.indexOf(it.code) < 0; }));
   }
   if (!pool.length) throw new Error('条件に合う未投稿の商品が見つかりませんでした（' + genre.label + '）');
   const picked = [];

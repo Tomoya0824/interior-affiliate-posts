@@ -28,7 +28,14 @@ const GENRES = {
   shelf: { id: 100804, keyword: 'オープンシェルフ おしゃれ', label: 'おしゃれ家具：シェルフ', tags: '#インテリア #見せる収納 #部屋づくり' },
   lowTable: { id: 100804, keyword: 'ローテーブル おしゃれ', label: 'おしゃれ家具：ローテーブル', tags: '#インテリア #おしゃれ家具 #部屋づくり' },
   pendant: { id: 100804, keyword: 'ペンダントライト おしゃれ', label: 'おしゃれ照明：ペンダントライト', tags: '#インテリア #照明 #部屋づくり' },
-  mirror: { id: 100804, keyword: 'スタンドミラー おしゃれ', label: 'おしゃれ家具：ミラー', tags: '#インテリア #おしゃれ家具 #部屋づくり' }
+  mirror: { id: 100804, keyword: 'スタンドミラー おしゃれ', label: 'おしゃれ家具：ミラー', tags: '#インテリア #おしゃれ家具 #部屋づくり' },
+  // 2026-11-13 追加：手に取りやすい価格の「置くだけで垢抜ける」雑貨と、季節の商品
+  tableLamp: { id: 100804, keyword: 'テーブルランプ おしゃれ', label: 'おしゃれ照明：テーブルランプ', tags: '#インテリア #照明 #部屋づくり', maxPrice: 12000 },
+  vase: { id: 100804, keyword: 'フラワーベース おしゃれ', label: 'インテリア雑貨：フラワーベース', tags: '#インテリア #部屋づくり', maxPrice: 8000 },
+  cushionCover: { id: 100804, keyword: 'クッションカバー おしゃれ', label: 'インテリア雑貨：クッションカバー', tags: '#インテリア #部屋づくり', minPrice: 1000, maxPrice: 6000 },
+  wallDecor: { id: 100804, keyword: 'ファブリックパネル おしゃれ', label: 'インテリア雑貨：壁の飾り', tags: '#インテリア #部屋づくり', maxPrice: 10000 },
+  xmas: { id: undefined, keyword: 'クリスマスツリー 北欧 おしゃれ', label: '季節：クリスマスツリー・オーナメント', tags: '#クリスマス #インテリア', maxPrice: 15000 },
+  winterRug: { id: 100804, keyword: 'ラグ おしゃれ 冬', label: '季節：冬のラグ', tags: '#インテリア #冬支度', maxPrice: 12000 }
 };
 
 /**

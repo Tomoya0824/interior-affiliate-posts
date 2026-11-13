@@ -15,7 +15,9 @@
 const THREADS_REDIRECT_URI = 'https://tomoya0824.github.io/interior-affiliate-posts/callback.html';
 const THREADS_AUTH_BASE = 'https://threads.com/oauth/authorize';
 const THREADS_GRAPH = 'https://graph.threads.com';
-const THREADS_SCOPES = ['threads_basic', 'threads_content_publish'];
+// 返信（リンクをリプ欄に置く）とインサイト（閲覧数・クリック数の記録）にも使う。
+// スコープを足したら threadsStep1 → threadsStep2 をやり直して、トークンを取り直す
+const THREADS_SCOPES = ['threads_basic', 'threads_content_publish', 'threads_manage_replies', 'threads_manage_insights'];
 
 function props_() {
   return PropertiesService.getScriptProperties();
@@ -113,35 +115,77 @@ function setupThreadsRefreshTrigger() {
 }
 
 /**
- * Threads に投稿する。
- * imageUrl を渡すと画像付き、省略するとテキストのみ。
- * 戻り値は公開された投稿のID。
+ * Threads に投稿する（従来の呼び方）。
+ * imageUrl を渡すと画像付き、省略するとテキストのみ。戻り値は公開された投稿のID。
  */
 function postToThreads(text, imageUrl) {
+  return publishThreads({ text: text, images: imageUrl ? [imageUrl] : [] });
+}
+
+/**
+ * Threads に投稿する。
+ * opts: { text, images: [url,...]（0枚=テキスト、1枚=画像、2〜20枚=カルーセル）, topicTag, replyToId }
+ * 戻り値は公開された投稿のID。
+ */
+function publishThreads(opts) {
   const userId = requireProp_('THREADS_USER_ID');
   const token = requireProp_('THREADS_TOKEN');
+  const images = (opts.images || []).filter(function (u) { return !!u; }).slice(0, 20);
+  const endpoint = THREADS_GRAPH + '/v1.0/' + userId + '/threads';
 
-  const payload = { text: text, access_token: token };
-  if (imageUrl) {
+  const payload = { text: opts.text || '', access_token: token };
+  if (opts.topicTag) payload.topic_tag = cleanTopicTag_(opts.topicTag);
+  if (opts.replyToId) payload.reply_to_id = opts.replyToId;
+
+  if (images.length >= 2) {
+    // カルーセル：画像ごとに子コンテナを作ってから、まとめる
+    const children = images.map(function (url) {
+      return fetchJson_(endpoint, {
+        method: 'post',
+        payload: { media_type: 'IMAGE', image_url: url, is_carousel_item: 'true', access_token: token }
+      }).id;
+    });
+    children.forEach(function (id) { waitContainerReady_(id, token); });
+    payload.media_type = 'CAROUSEL';
+    payload.children = children.join(',');
+  } else if (images.length === 1) {
     payload.media_type = 'IMAGE';
-    payload.image_url = imageUrl;
+    payload.image_url = images[0];
   } else {
     payload.media_type = 'TEXT';
   }
 
-  const container = fetchJson_(THREADS_GRAPH + '/v1.0/' + userId + '/threads', {
-    method: 'post',
-    payload: payload
-  });
-
-  // 画像の処理が終わるまで少し待ってから公開する
-  Utilities.sleep(imageUrl ? 30000 : 3000);
+  const container = fetchJson_(endpoint, { method: 'post', payload: payload });
+  waitContainerReady_(container.id, token);
 
   const published = fetchJson_(THREADS_GRAPH + '/v1.0/' + userId + '/threads_publish', {
     method: 'post',
     payload: { creation_id: container.id, access_token: token }
   });
   return published.id;
+}
+
+/** コンテナの準備ができるまで待つ（最大およそ90秒） */
+function waitContainerReady_(containerId, token) {
+  for (let i = 0; i < 18; i++) {
+    Utilities.sleep(i === 0 ? 3000 : 5000);
+    let st;
+    try {
+      st = fetchJson_(THREADS_GRAPH + '/v1.0/' + containerId + '?' + query_({ fields: 'status,error_message', access_token: token }));
+    } catch (e) {
+      continue; // 状態が読めないときは待ち続ける
+    }
+    if (st.status === 'FINISHED' || st.status === 'PUBLISHED') return;
+    if (st.status === 'ERROR' || st.status === 'EXPIRED') {
+      throw new Error('Threadsのメディア処理に失敗しました：' + (st.error_message || st.status));
+    }
+  }
+  // 状態が FINISHED にならなくても、公開を試す（失敗すればエラーになる）
+}
+
+/** トピックタグに使えない文字（# . &）を除く */
+function cleanTopicTag_(tag) {
+  return String(tag).replace(/^#/, '').replace(/[.&＆]/g, '').trim().slice(0, 50);
 }
 
 /** 手順5：テキストのテスト投稿（確認後、Threadsアプリから削除してください） */

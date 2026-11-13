@@ -1,23 +1,32 @@
 /**
  * Room Totonoe — 毎日の自動投稿
  *
- * collectCandidates … 朝、楽天の売れ筋から候補を3つ選んでGitHubに保存する
- * postDaily     … 夜、Claudeが書いた投稿文でThreadsに画像付きで投稿する（なければ従来の文面）
- * postTipDaily  … 昼、Claudeが書いた「暮らしのコツ」をリンクなしで投稿する（なければ投稿しない）
- * previewDaily / previewTip … 投稿はせず、今日投稿される内容をログで確認する
- * setupCollectTrigger / setupDailyTrigger … 毎朝7時台・毎晩20時台のトリガーを作る（一度だけ）
+ * collectCandidates … 朝7時台、楽天から今日のジャンルの候補を3つ選んでGitHubに保存する
+ * postMorningDaily  … 朝9時台、Claudeが書いた「問いかけ」をテキストで投稿する（なければ投稿しない）
+ * postTipDaily      … 昼12時台、Claudeが書いた「部屋づくりのコツ」をリンクなしで投稿する（なければ投稿しない）
+ * postDaily         … 夜20時台、Claudeが書いた商品投稿を、画像（3枚ならカルーセル）付きで投稿し、
+ *                     楽天のリンクは自分の投稿へのリプ欄に置く（なければ従来の文面）
+ * collectInsights   … 夜23時台、直近7日の投稿の閲覧数・返信数とリンクのクリック数をGitHubに保存する
+ * previewDaily / previewTip / previewMorning … 投稿はせず、今日投稿される内容をログで確認する
+ * setupAllTriggers  … 上のトリガーをまとめて作り直す（一度だけ）
  */
 
-// 商品を選ぶ条件
+// 商品を選ぶ条件（ジャンルごとに minPrice / maxPrice で上書きできる）
+// フォロワーが少ないうちは、迷わず買える価格帯（〜1.5万円）のほうがクリックから購入につながりやすい
 const PICK_RULES = {
   minReviewCount: 30,
   minReviewAverage: 4.0,
-  minPrice: 2000,
-  maxPrice: 50000
+  minPrice: 1500,
+  maxPrice: 15000
 };
 
-// 曜日ごとの担当（日〜土）。おしゃれな家具・照明を日替わりで
-const GENRE_SCHEDULE = ['sideTable', 'floorLight', 'stool', 'shelf', 'lowTable', 'pendant', 'mirror'];
+// 曜日ごとの担当（日〜土）。家具より、置くだけで部屋が変わる照明・雑貨を多めに
+const GENRE_SCHEDULE = ['tableLamp', 'vase', 'sideTable', 'cushionCover', 'shelf', 'floorLight', 'wallDecor'];
+
+// 季節の差し替え（MM-DD の範囲・曜日番号 0=日 … 6=土）
+const SEASONAL_OVERRIDES = [
+  { from: '11-01', to: '12-20', days: { 3: 'winterRug', 6: 'xmas' } }
+];
 
 // 体への効果をうたう表現は使わない（薬機法対策）。商品名にあれば削る
 const NG_WORDS = ['肩こり', '腰痛', '改善', '治る', '効く', '解消', '安眠', '快眠', '痩せ', 'ダイエット', '美肌', '医療', '治療'];
@@ -29,8 +38,13 @@ function todayKey_() {
 
 function todayGenreKey_() {
   // 'u' は 1=月 … 7=日。GENRE_SCHEDULE は 0=日 … 6=土
-  const u = Number(Utilities.formatDate(new Date(), 'Asia/Tokyo', 'u'));
-  return GENRE_SCHEDULE[u % 7];
+  const dow = Number(Utilities.formatDate(new Date(), 'Asia/Tokyo', 'u')) % 7;
+  const md = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'MM-dd');
+  for (let i = 0; i < SEASONAL_OVERRIDES.length; i++) {
+    const o = SEASONAL_OVERRIDES[i];
+    if (md >= o.from && md <= o.to && o.days[dow] && GENRES[o.days[dow]]) return o.days[dow];
+  }
+  return GENRE_SCHEDULE[dow];
 }
 
 function todayGenre_() {
@@ -62,8 +76,8 @@ function pickItems_(genre, n) {
           sort: '-reviewCount',
           hits: 30,
           page: page,
-          minPrice: PICK_RULES.minPrice,
-          maxPrice: PICK_RULES.maxPrice
+          minPrice: genre.minPrice || PICK_RULES.minPrice,
+          maxPrice: genre.maxPrice || PICK_RULES.maxPrice
         });
       } catch (e) {
         if (page === 1) throw e;
@@ -143,13 +157,13 @@ function sizeLine_(name) {
 function buildPostText_(item, genre) {
   const sizes = sizeLine_(item.name);
   const lines = [
-    '#PR ' + shortName_(item.name),
+    '【PR】' + shortName_(item.name),
     '',
     '★' + item.reviewAverage.toFixed(2) + '（レビュー' + item.reviewCount.toLocaleString('ja-JP') + '件）',
     item.price.toLocaleString('ja-JP') + '円〜（税込・投稿時点）'
   ];
   if (sizes) lines.push(sizes);
-  lines.push('', '楽天で詳細を見る', item.affiliateUrl, '', genre.tags + ' #楽天で見つけた');
+  lines.push('', '楽天市場で見る ▶', shortAffiliateUrl_(item.affiliateUrl));
   return lines.join('\n').slice(0, 500);
 }
 
@@ -181,7 +195,8 @@ function candidateFromItem_(item) {
     shop: item.shop,
     sizes: sizeLine_(item.name).replace('選べるサイズ：', ''),
     affiliateUrl: item.affiliateUrl,
-    image: item.images[0]
+    image: item.images[0],
+    images: item.images.slice(0, 3)
   };
 }
 
@@ -202,32 +217,55 @@ function shortAffiliateUrl_(url) {
   return m ? m[1] + '?pc=' + m[2] : url;
 }
 
-/** Claude の本文から投稿文を組み立てる。条件を満たさなければ null */
-function composeFromQueue_(post, cand) {
-  const body = String(post.body || '').trim();
-  if (body.length < 40) return null;
+// ---------------------------------------------------------------
+// 商品投稿（2026-11-13 改訂）
+//  本文（画像・カルーセル付き）にはリンクを入れず、楽天のリンクは自分の投稿へのリプ欄に置く。
+//  ・楽天アフィリエイトのガイドラインで禁止されているのは「他人の投稿」へのリンク掲載。自分の投稿へのリプライは可
+//  ・広告であることは本文とリプの両方の先頭に【PR】で示す（ステマ規制対応）
+//  ・ハッシュタグは本文に並べず、トピックタグを1つだけ API の topic_tag で付ける
+//    （本文の最初の「#〇〇」がトピックとして扱われるため、従来は「#PR」がトピックになっていた）
+// ---------------------------------------------------------------
+
+const PR_LABEL = '【PR】';
+const NUMS = ['①', '②', '③', '④', '⑤'];
+
+/** queue/posts の形（新旧どちらも）を読みやすい形にそろえる */
+function normalizePost_(post) {
+  let items = (post.items || []).filter(function (it) { return it && it.code; });
+  if (!items.length && post.code) items = [{ code: post.code, label: '' }];
+  const topic = post.topic || ((post.hashtags || [])[0] || '').replace(/^#/, '') || 'インテリア';
+  return {
+    format: items.length >= 2 ? 'pick' : 'single',
+    hook: post.hook || '',
+    body: String(post.body || '').trim(),
+    topic: topic,
+    items: items
+  };
+}
+
+function checkBody_(body, minLen) {
+  if (body.length < minLen) return '本文が短すぎます（' + body.length + '文字）';
   const bad = BODY_NG.filter(function (w) { return body.indexOf(w) >= 0; });
-  if (bad.length) {
-    Logger.log('本文に使えない表現があったため、従来の文面で投稿します：' + bad.join('、'));
-    return null;
-  }
-  const tags = (post.hashtags || []).filter(function (t) { return /^#\S+$/.test(t); }).slice(0, 3).join(' ');
+  if (bad.length) return '本文に使えない表現があります：' + bad.join('、');
+  if (/#\S/.test(body)) return '本文にハッシュタグがあります（トピックは topic で指定）';
+  return '';
+}
+
+/** リプ欄に置く、1商品ぶんのリンク文 */
+function linkReplyText_(cand, label, num) {
   const info = '★' + Number(cand.reviewAverage).toFixed(2) + '（レビュー' + Number(cand.reviewCount).toLocaleString('ja-JP') +
     '件）・' + Number(cand.price).toLocaleString('ja-JP') + '円〜（投稿時点）';
-
-  const build = function (url) {
-    return ['#PR', body, '', info, '▶ 楽天で見る', url, '', tags].join('\n').trim();
-  };
+  const head = PR_LABEL + (num || '') + (label || shortName_(cand.name));
+  const build = function (url) { return [head, info, '楽天市場で見る ▶', url].join('\n'); };
   let text = build(cand.affiliateUrl);
   if (text.length > THREADS_MAX) text = build(shortAffiliateUrl_(cand.affiliateUrl));
-  if (text.length > THREADS_MAX) {
-    Logger.log('投稿文が' + THREADS_MAX + '文字を超えるため、従来の文面で投稿します');
-    return null;
-  }
   return text;
 }
 
-/** 今日の投稿内容を決める。{ text, image, code, source } */
+/**
+ * 今日の商品投稿を組み立てる。
+ * { main: { text, images, topicTag }, replies: [text...], codes: [...], format, hook, source }
+ */
 function todaysPost_() {
   const date = todayKey_();
   const genre = todayGenre_();
@@ -236,10 +274,30 @@ function todaysPost_() {
       const postFile = ghGetFile('queue/posts/' + date + '.json');
       const candFile = ghGetFile('queue/candidates/' + date + '.json');
       if (postFile && candFile) {
-        const post = JSON.parse(postFile.text);
-        const cand = (JSON.parse(candFile.text).items || []).filter(function (c) { return c.code === post.code; })[0];
-        const text = cand ? composeFromQueue_(post, cand) : null;
-        if (text) return { text: text, image: cand.image, code: cand.code, source: 'claude' };
+        const post = normalizePost_(JSON.parse(postFile.text));
+        const cands = JSON.parse(candFile.text).items || [];
+        const picked = post.items.map(function (it) {
+          return { cand: cands.filter(function (c) { return c.code === it.code; })[0], label: it.label };
+        }).filter(function (p) { return !!p.cand; });
+        const problem = picked.length !== post.items.length ? '候補にない商品コードがあります' : checkBody_(post.body, 40);
+        if (!problem) {
+          const multi = picked.length >= 2;
+          const mainText = PR_LABEL + '\n' + post.body + '\n\n楽天市場のリンクはリプ欄に置いています';
+          if (mainText.length <= THREADS_MAX) {
+            const images = multi
+              ? picked.map(function (p) { return p.cand.image; })
+              : (picked[0].cand.images && picked[0].cand.images.length ? picked[0].cand.images : [picked[0].cand.image]);
+            return {
+              main: { text: mainText, images: images, topicTag: post.topic },
+              replies: picked.map(function (p, n) { return linkReplyText_(p.cand, p.label, multi ? NUMS[n] : ''); }),
+              codes: picked.map(function (p) { return p.cand.code; }),
+              format: post.format, hook: post.hook, topic: post.topic, source: 'claude'
+            };
+          }
+          Logger.log('本文が長すぎるため、従来の文面で投稿します');
+        } else {
+          Logger.log(problem + '。従来の文面で投稿します');
+        }
       } else {
         Logger.log('今日のClaudeの投稿文が見つからないため、従来の文面で投稿します');
       }
@@ -248,27 +306,59 @@ function todaysPost_() {
     }
   }
   const item = pickItem_(genre);
-  return { text: buildPostText_(item, genre), image: item.images[0], code: item.code, source: 'template' };
+  return {
+    main: { text: buildPostText_(item, genre), images: [item.images[0]], topicTag: 'インテリア' },
+    replies: [], codes: [item.code], format: 'template', hook: '', topic: 'インテリア', source: 'template'
+  };
 }
 
 /** 投稿せずに、今日投稿される内容を確認する */
 function previewDaily() {
   const p = todaysPost_();
-  Logger.log('文面の種類：' + (p.source === 'claude' ? 'Claudeが書いた文章' : '従来の文面') +
-    '\n画像：' + p.image + '\n文字数：' + p.text.length + '\n\n--- 投稿文 ---\n' + p.text);
+  Logger.log('文面の種類：' + (p.source === 'claude' ? 'Claudeが書いた文章（' + p.format + '）' : '従来の文面') +
+    '\nトピック：' + p.main.topicTag + '\n画像：\n' + p.main.images.join('\n') +
+    '\n\n--- 本文（' + p.main.text.length + '文字）---\n' + p.main.text +
+    p.replies.map(function (r, n) { return '\n\n--- リプ' + (n + 1) + '（' + r.length + '文字）---\n' + r; }).join(''));
 }
 
-/** 毎日の投稿本体 */
+/** 毎日の商品投稿 */
 function postDaily() {
   const p = todaysPost_();
-  const postId = postToThreads(p.text, p.image);
-  rememberPosted_(p.code);
+  const postId = publishThreads(p.main);
+  p.codes.forEach(rememberPosted_);
   Logger.log('Threadsに投稿しました（' + p.source + '）：' + postId);
+
+  // リンクを自分の投稿へのリプ欄に、順につなげて置く
+  const replyIds = [];
+  let replyError = '';
+  let parent = postId;
+  for (let i = 0; i < p.replies.length; i++) {
+    try {
+      parent = publishThreads({ text: p.replies[i], replyToId: parent });
+      replyIds.push(parent);
+    } catch (e) {
+      replyError = e.message;
+      break;
+    }
+  }
+  if (replyError) {
+    // 返信の権限がないなどで失敗したら、リンクが消えないよう、リンクだけの投稿を別に出す
+    Logger.log('リプ欄へのリンク投稿に失敗しました（' + replyError + '）。リンクを別の投稿で出します。' +
+      'threadsStep1 → threadsStep2 をやり直して、返信の権限付きのトークンを取り直してください');
+    try {
+      publishThreads({ text: p.replies[replyIds.length] });
+    } catch (e2) {
+      Logger.log('リンク投稿にも失敗しました：' + e2.message);
+    }
+  }
+
   if (hasGitHub_()) {
     try {
-      ghPutFile('queue/posted/' + todayKey_() + '.json',
-        JSON.stringify({ date: todayKey_(), code: p.code, source: p.source, threadsId: postId, text: p.text }, null, 2),
-        'Record post for ' + todayKey_());
+      ghPutFile('queue/posted/' + todayKey_() + '.json', JSON.stringify({
+        date: todayKey_(), kind: 'product', codes: p.codes, code: p.codes[0], source: p.source, format: p.format,
+        hook: p.hook, topic: p.topic, threadsId: postId, replyIds: replyIds, replyError: replyError,
+        text: p.main.text, replies: p.replies
+      }, null, 2), 'Record post for ' + todayKey_());
     } catch (e) {
       Logger.log('投稿記録の保存に失敗しました（投稿自体は完了）：' + e.message);
     }
@@ -276,70 +366,71 @@ function postDaily() {
 }
 
 // ---------------------------------------------------------------
-// お役立ち投稿（毎日12時台・リンクなし）
-//  Claudeが queue/tips/日付.json に書いた文章をテキストのみで投稿する。
+// テキストだけの投稿（朝の問いかけ・昼のコツ）
+//  Claudeが queue/<dir>/日付.json に書いた文章を、リンクなしで投稿する。
 //  文章がない日は何も投稿しない（決まった文面の宣伝は増やさない）。
 // ---------------------------------------------------------------
 
-function todaysTip_() {
+function todaysText_(dir) {
   if (!hasGitHub_()) return null;
-  const file = ghGetFile('queue/tips/' + todayKey_() + '.json');
+  const file = ghGetFile('queue/' + dir + '/' + todayKey_() + '.json');
   if (!file) return null;
-  const tip = JSON.parse(file.text);
-  const body = String(tip.body || '').trim();
-  if (body.length < 60) return null;
-  const bad = BODY_NG.filter(function (w) { return body.indexOf(w) >= 0; });
-  if (bad.length) {
-    Logger.log('お役立ち投稿に使えない表現があったため、今日は投稿しません：' + bad.join('、'));
+  const data = JSON.parse(file.text);
+  const body = String(data.body || '').trim();
+  const problem = checkBody_(body, dir === 'morning' ? 20 : 60);
+  if (problem) {
+    Logger.log(dir + '：' + problem + '。今日は投稿しません');
     return null;
   }
-  const tags = (tip.hashtags || []).filter(function (t) { return /^#\S+$/.test(t); }).slice(0, 3).join(' ');
-  const text = (body + (tags ? '\n\n' + tags : '')).slice(0, THREADS_MAX);
-  return { text: text, theme: tip.theme || '' };
+  const topic = data.topic || ((data.hashtags || [])[0] || '').replace(/^#/, '') || 'インテリア';
+  return { text: body.slice(0, THREADS_MAX), topic: topic, theme: data.theme || '', hook: data.hook || '' };
 }
 
-/** お役立ち投稿の内容を確認する（投稿はしない） */
-function previewTip() {
-  const tip = todaysTip_();
-  Logger.log(tip ? 'テーマ：' + tip.theme + '\n文字数：' + tip.text.length + '\n\n' + tip.text
-    : '今日のお役立ち投稿はまだありません');
+function previewText_(dir) {
+  const t = todaysText_(dir);
+  Logger.log(t ? 'テーマ：' + t.theme + '\nトピック：' + t.topic + '\n文字数：' + t.text.length + '\n\n' + t.text
+    : '今日の ' + dir + ' の投稿はまだありません');
 }
 
-/** お役立ち投稿の本体 */
-function postTipDaily() {
-  const tip = todaysTip_();
-  if (!tip) {
-    Logger.log('今日のお役立ち投稿がないため、何もしませんでした');
+function postText_(dir, suffix) {
+  const t = todaysText_(dir);
+  if (!t) {
+    Logger.log('今日の ' + dir + ' の投稿がないため、何もしませんでした');
     return;
   }
-  const postId = postToThreads(tip.text);
-  Logger.log('お役立ち投稿をしました：' + postId);
+  const postId = publishThreads({ text: t.text, topicTag: t.topic });
+  Logger.log(dir + ' を投稿しました：' + postId);
   try {
-    ghPutFile('queue/posted/' + todayKey_() + '-tip.json',
-      JSON.stringify({ date: todayKey_(), theme: tip.theme, threadsId: postId, text: tip.text }, null, 2),
-      'Record tip post for ' + todayKey_());
+    ghPutFile('queue/posted/' + todayKey_() + suffix + '.json',
+      JSON.stringify({ date: todayKey_(), kind: dir, theme: t.theme, hook: t.hook, topic: t.topic, threadsId: postId, text: t.text }, null, 2),
+      'Record ' + dir + ' post for ' + todayKey_());
   } catch (e) {
     Logger.log('投稿記録の保存に失敗しました（投稿自体は完了）：' + e.message);
   }
 }
 
-/** 毎日12時台に postTipDaily を実行するトリガーを作る（一度だけ実行） */
-function setupTipTrigger() {
-  replaceTrigger_('postTipDaily', 12);
-  Logger.log('毎日12時台にお役立ち投稿をするトリガーを作りました');
-}
+function previewTip() { previewText_('tips'); }
+function postTipDaily() { postText_('tips', '-tip'); }
+function previewMorning() { previewText_('morning'); }
+function postMorningDaily() { postText_('morning', '-morning'); }
 
-/** 毎日20時台に postDaily を実行するトリガーを作る（一度だけ実行） */
-function setupDailyTrigger() {
-  replaceTrigger_('postDaily', 20);
-  Logger.log('毎日20時台に自動投稿するトリガーを作りました');
-}
+// ---------------------------------------------------------------
+// トリガー
+// ---------------------------------------------------------------
 
-/** 毎朝7時台に collectCandidates を実行するトリガーを作る（一度だけ実行） */
-function setupCollectTrigger() {
+/** すべてのトリガーをまとめて作り直す（一度だけ実行） */
+function setupAllTriggers() {
   replaceTrigger_('collectCandidates', 7);
-  Logger.log('毎朝7時台に候補を保存するトリガーを作りました');
+  replaceTrigger_('postMorningDaily', 9);
+  replaceTrigger_('postTipDaily', 12);
+  replaceTrigger_('postDaily', 20);
+  replaceTrigger_('collectInsights', 23);
+  Logger.log('トリガーを作りました：7時台 候補 / 9時台 朝の問いかけ / 12時台 コツ / 20時台 商品 / 23時台 数字の記録');
 }
+
+function setupTipTrigger() { replaceTrigger_('postTipDaily', 12); }
+function setupDailyTrigger() { replaceTrigger_('postDaily', 20); }
+function setupCollectTrigger() { replaceTrigger_('collectCandidates', 7); }
 
 function replaceTrigger_(fn, hour) {
   ScriptApp.getProjectTriggers()
